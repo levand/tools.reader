@@ -1,7 +1,7 @@
 (ns clojure.tools.reader-test
-  (:refer-clojure :exclude [read-string *default-data-reader-fn*])
-  (:use [clojure.tools.reader :only [read-string *default-data-reader-fn*]]
-        [clojure.test :only [deftest is]])
+  (:refer-clojure :exclude [read-string *default-data-reader-fn* *features*])
+  (:use [clojure.tools.reader :only [read-string *default-data-reader-fn* *features*]]
+        [clojure.test :only [deftest is are]])
   (:import clojure.lang.BigInt))
 
 (load "common_tests")
@@ -88,3 +88,47 @@
 
 (deftest read-ctor
   (is (= "foo" (read-string "#java.lang.String[\"foo\"]"))))
+
+(deftest read-features
+  (binding [*features* #{:clj}]
+    (are [out s] (= out (read-string s))
+
+         ["x"] "[#+clj \"x\"]"
+         ["a" "x"] "[\"a\" #+clj \"x\"]"
+         [] "[#+cljs \"x\"]"
+
+         ["x"] "[#+(and) \"x\"]"
+         ["x"] "[#+(and clj) \"x\"]"
+         ["x"] "[#+(and clj clj) \"x\"]"
+         [] "[#+(and clj cljs) \"x\"]"
+
+         [] "[#+(or) \"x\"]"
+         ["x"] "[#+(or clj) \"x\"]"
+         ["x"] "[#+(or clj cljs) \"x\"]"
+         []   "[#+(or cljs) \"x\"]"
+
+         ["x"] "[#+(not cljs) \"x\"]"
+
+         nil "#+cljs #js {} nil"
+         :foo "#+cljs #js {} :foo"
+
+         "x" "#+cljs [:foo #bar 123 :baz] #+clj \"x\""
+
+         :foo/bar "#-clj :baz :foo/bar"
+         :baz "#-cljs :baz"
+         :x "#-(not clj) :x"
+
+         [] "[#-(and) \"x\"]"
+         [] "[#-(and clj) \"x\"]"
+         [] "[#-(and clj clj) \"x\"]"
+         ["x"] "[#-(and clj cljs) \"x\"]"
+
+         ["x"] "[#-(or) \"x\"]"
+         [] "[#-(or clj) \"x\"]"
+         [] "[#-(or clj cljs) \"x\"]"
+         ["x"] "[#-(or cljs) \"x\"]"
+
+         "foo"         "#+cljs \"bar\" \"foo\""
+         "foo"         "#+cljs #js \"bar\" \"foo\""
+         ["foo"]       "[ #+cljs \"bar\" \"foo\"]"
+         []            "[ #+cljs \"bar\"]")))

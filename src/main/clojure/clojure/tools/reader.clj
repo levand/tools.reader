@@ -11,7 +11,7 @@
   clojure.tools.reader
   (:refer-clojure :exclude [read read-line read-string char
                             default-data-readers *default-data-reader-fn*
-                            *read-eval* *data-readers*])
+                            *read-eval* *data-readers* *features* *suppress-read*])
   (:use clojure.tools.reader.reader-types
         [clojure.tools.reader.impl utils commons])
   (:require [clojure.tools.reader.default-data-readers :as data-readers])
@@ -29,6 +29,8 @@
          ^:dynamic *read-eval*
          ^:dynamic *data-readers*
          ^:dynamic *default-data-reader-fn*
+         ^:dynamic *features*
+         ^:dynamic *suppress-read*
          default-data-readers)
 
 (defn- macro-terminating? [ch]
@@ -56,9 +58,7 @@
   (if-let [ch (read-char rdr)]
     (if-let [dm (dispatch-macros ch)]
       (dm rdr ch)
-      (if-let [obj (read-tagged (doto rdr (unread ch)) ch)] ;; ctor reader is implemented as a taggged literal
-        obj
-        (reader-error rdr "No dispatch macro for " ch)))
+      (read-tagged (doto rdr (unread ch)) ch)) ;; ctor reader is implemented as a taggged literal
     (reader-error rdr "EOF while reading character")))
 
 (defn- read-unmatched-delimiter
@@ -590,6 +590,29 @@
     (-> (read rdr true nil true)
       syntax-quote*)))
 
+(defn- supported-feature? [expr]
+  (cond
+   (symbol? expr)
+   (contains? *features* (keyword expr))
+   (list? expr)
+   (let [[op & r] expr]
+     (condp = op
+       'and (or (empty? r)
+                (every? supported-feature? r))
+       'not (not (supported-feature? (first r)))
+       'or (and (not (empty? r))
+                (not (not-any? supported-feature? r)))
+       (throw (str "Invalid feature expression operator: " op))))
+   :else (throw (str "Invalid feature expression: " expr))))
+
+(defn read-feature
+  [rdr mode]
+  (let [test (read rdr true nil true)]
+    (if (= (supported-feature? test) (= mode \+))
+      (read rdr true nil true)
+      (binding [*suppress-read* true]
+        (read-discard rdr nil)))))
+
 (defn- macros [ch]
   (case ch
     \" read-string*
@@ -622,6 +645,8 @@
     \" read-regex
     \! read-comment
     \_ read-discard
+    \+ read-feature
+    \- read-feature
     nil))
 
 (defn- read-tagged* [rdr tag f]
@@ -665,14 +690,16 @@
   (let [tag (read rdr true nil false)]
     (if-not (symbol? tag)
       (reader-error rdr "Reader tag must be a symbol"))
-    (if-let [f (or (*data-readers* tag)
-                   (default-data-readers tag))]
-      (read-tagged* rdr tag f)
-      (if (.contains (name tag) ".")
-        (read-ctor rdr tag)
-        (if-let [f *default-data-reader-fn*]
-          (f tag (read rdr true nil true))
-          (reader-error rdr "No reader function for tag " (name tag)))))))
+    (if *suppress-read*
+      (do (read-discard rdr tag) nil) ;; throw away form
+      (if-let [f (or (*data-readers* tag)
+                     (default-data-readers tag))]
+        (read-tagged* rdr tag f)
+        (if (.contains (name tag) ".")
+          (read-ctor rdr tag)
+          (if-let [f *default-data-reader-fn*]
+            (f tag (read rdr true nil true))
+            (reader-error rdr "No reader function for tag " (name tag))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Public API
@@ -709,6 +736,10 @@
    If *default-data-reader-fn* is nil (the default value), an exception
    will be thrown for the unknown tag."
   nil)
+
+(def ^:dynamic *suppress-read* false)
+
+(def ^:dynamic *features* #{})
 
 (def default-data-readers
   "Default map of data reader functions provided by Clojure.
