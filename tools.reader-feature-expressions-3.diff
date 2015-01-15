@@ -1,0 +1,184 @@
+From 3d887cb20f92e29255b2a6b40418982b31cc94d6 Mon Sep 17 00:00:00 2001
+From: Ghadi Shayban <gshayban@gmail.com>
+Date: Tue, 5 Aug 2014 14:08:53 -0500
+Subject: [PATCH] Feature expressions
+
+---
+ src/main/clojure/clojure/tools/reader.clj      | 55 ++++++++++++++++++++------
+ src/test/clojure/clojure/tools/reader_test.clj | 50 +++++++++++++++++++++--
+ 2 files changed, 90 insertions(+), 15 deletions(-)
+
+diff --git a/src/main/clojure/clojure/tools/reader.clj b/src/main/clojure/clojure/tools/reader.clj
+index 98b4ed6..1850e6c 100644
+--- a/src/main/clojure/clojure/tools/reader.clj
++++ b/src/main/clojure/clojure/tools/reader.clj
+@@ -11,7 +11,7 @@ (ns ^{:doc "A clojure reader in clojure"
+   clojure.tools.reader
+   (:refer-clojure :exclude [read read-line read-string char
+                             default-data-readers *default-data-reader-fn*
+-                            *read-eval* *data-readers*])
++                            *read-eval* *data-readers* *features* *suppress-read*])
+   (:use clojure.tools.reader.reader-types
+         [clojure.tools.reader.impl utils commons])
+   (:require [clojure.tools.reader.default-data-readers :as data-readers])
+@@ -28,6 +28,8 @@ (declare read macros dispatch-macros
+          ^:dynamic *read-eval*
+          ^:dynamic *data-readers*
+          ^:dynamic *default-data-reader-fn*
++         ^:dynamic *features*
++         ^:dynamic *suppress-read*
+          default-data-readers)
+ 
+ (defn- macro-terminating? [ch]
+@@ -55,9 +57,7 @@ (defn- read-dispatch
+   (if-let [ch (read-char rdr)]
+     (if-let [dm (dispatch-macros ch)]
+       (dm rdr ch)
+-      (if-let [obj (read-tagged (doto rdr (unread ch)) ch)] ;; ctor reader is implemented as a taggged literal
+-        obj
+-        (reader-error rdr "No dispatch macro for " ch)))
++      (read-tagged (doto rdr (unread ch)) ch)) ;; ctor reader is implemented as a taggged literal
+     (reader-error rdr "EOF while reading character")))
+ 
+ (defn- read-unmatched-delimiter
+@@ -599,6 +599,29 @@ (defn- read-syntax-quote
+     (-> (read rdr true nil true)
+       syntax-quote*)))
+ 
++(defn- supported-feature? [expr]
++  (cond
++   (symbol? expr)
++   (contains? *features* (keyword expr))
++   (list? expr)
++   (let [[op & r] expr]
++     (condp = op
++       'and (or (empty? r)
++                (every? supported-feature? r))
++       'not (not (supported-feature? (first r)))
++       'or (and (not (empty? r))
++                (not (not-any? supported-feature? r)))
++       (throw (str "Invalid feature expression operator: " op))))
++   :else (throw (str "Invalid feature expression: " expr))))
++
++(defn read-feature
++  [rdr mode]
++  (let [test (read rdr true nil true)]
++    (if (= (supported-feature? test) (= mode \+))
++      (read rdr true nil true)
++      (binding [*suppress-read* true]
++        (read-discard rdr nil)))))
++
+ (defn- macros [ch]
+   (case ch
+     \" read-string*
+@@ -631,6 +654,8 @@ (defn- dispatch-macros [ch]
+     \" read-regex
+     \! read-comment
+     \_ read-discard
++    \+ read-feature
++    \- read-feature
+     nil))
+ 
+ (defn- read-tagged* [rdr tag f]
+@@ -674,14 +699,16 @@ (defn- read-tagged [rdr initch]
+   (let [tag (read rdr true nil false)]
+     (if-not (symbol? tag)
+       (reader-error rdr "Reader tag must be a symbol"))
+-    (if-let [f (or (*data-readers* tag)
+-                   (default-data-readers tag))]
+-      (read-tagged* rdr tag f)
+-      (if (.contains (name tag) ".")
+-        (read-ctor rdr tag)
+-        (if-let [f *default-data-reader-fn*]
+-          (f tag (read rdr true nil true))
+-          (reader-error rdr "No reader function for tag " (name tag)))))))
++    (if *suppress-read*
++      (do (read-discard rdr tag) nil) ;; throw away form
++      (if-let [f (or (*data-readers* tag)
++                     (default-data-readers tag))]
++        (read-tagged* rdr tag f)
++        (if (.contains (name tag) ".")
++          (read-ctor rdr tag)
++          (if-let [f *default-data-reader-fn*]
++            (f tag (read rdr true nil true))
++            (reader-error rdr "No reader function for tag " (name tag))))))))
+ 
+ ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;; Public API
+@@ -719,6 +746,10 @@ (def ^:dynamic *default-data-reader-fn*
+    will be thrown for the unknown tag."
+   nil)
+ 
++(def ^:dynamic *suppress-read* false)
++
++(def ^:dynamic *features* #{})
++
+ (def default-data-readers
+   "Default map of data reader functions provided by Clojure.
+    May be overridden by binding *data-readers*"
+diff --git a/src/test/clojure/clojure/tools/reader_test.clj b/src/test/clojure/clojure/tools/reader_test.clj
+index c41ed51..3dad100 100644
+--- a/src/test/clojure/clojure/tools/reader_test.clj
++++ b/src/test/clojure/clojure/tools/reader_test.clj
+@@ -1,7 +1,7 @@
+ (ns clojure.tools.reader-test
+-  (:refer-clojure :exclude [read-string *default-data-reader-fn*])
+-  (:use [clojure.tools.reader :only [read-string *default-data-reader-fn*]]
+-        [clojure.test :only [deftest is]])
++  (:refer-clojure :exclude [read-string *default-data-reader-fn* *features*])
++  (:use [clojure.tools.reader :only [read-string *default-data-reader-fn* *features*]]
++        [clojure.test :only [deftest is are]])
+   (:import clojure.lang.BigInt))
+ 
+ (load "common_tests")
+@@ -88,3 +88,47 @@ (deftest read-record
+ 
+ (deftest read-ctor
+   (is (= "foo" (read-string "#java.lang.String[\"foo\"]"))))
++
++(deftest read-features
++  (binding [*features* #{:clj}]
++    (are [out s] (= out (read-string s))
++
++         ["x"] "[#+clj \"x\"]"
++         ["a" "x"] "[\"a\" #+clj \"x\"]"
++         [] "[#+cljs \"x\"]"
++
++         ["x"] "[#+(and) \"x\"]"
++         ["x"] "[#+(and clj) \"x\"]"
++         ["x"] "[#+(and clj clj) \"x\"]"
++         [] "[#+(and clj cljs) \"x\"]"
++
++         [] "[#+(or) \"x\"]"
++         ["x"] "[#+(or clj) \"x\"]"
++         ["x"] "[#+(or clj cljs) \"x\"]"
++         []   "[#+(or cljs) \"x\"]"
++
++         ["x"] "[#+(not cljs) \"x\"]"
++
++         nil "#+cljs #js {} nil"
++         :foo "#+cljs #js {} :foo"
++
++         "x" "#+cljs [:foo #bar 123 :baz] #+clj \"x\""
++
++         :foo/bar "#-clj :baz :foo/bar"
++         :baz "#-cljs :baz"
++         :x "#-(not clj) :x"
++
++         [] "[#-(and) \"x\"]"
++         [] "[#-(and clj) \"x\"]"
++         [] "[#-(and clj clj) \"x\"]"
++         ["x"] "[#-(and clj cljs) \"x\"]"
++
++         ["x"] "[#-(or) \"x\"]"
++         [] "[#-(or clj) \"x\"]"
++         [] "[#-(or clj cljs) \"x\"]"
++         ["x"] "[#-(or cljs) \"x\"]"
++
++         "foo"         "#+cljs \"bar\" \"foo\""
++         "foo"         "#+cljs #js \"bar\" \"foo\""
++         ["foo"]       "[ #+cljs \"bar\" \"foo\"]"
++         []            "[ #+cljs \"bar\"]")))
+-- 
+1.8.3.2
+
